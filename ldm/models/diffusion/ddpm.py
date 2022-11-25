@@ -26,6 +26,7 @@ from ldm.modules.distributions.distributions import normal_kl, DiagonalGaussianD
 from ldm.models.autoencoder import IdentityFirstStage, AutoencoderKL
 from ldm.modules.diffusionmodules.util import make_beta_schedule, extract_into_tensor, noise_like
 from ldm.models.diffusion.ddim import DDIMSampler
+from shark_utils.util import compile_through_fx
 
 
 __conditioning_keys__ = {'concat': 'c_concat',
@@ -1312,6 +1313,7 @@ class DiffusionWrapper(pl.LightningModule):
         super().__init__()
         self.sequential_cross_attn = diff_model_config.pop("sequential_crossattn", False)
         self.diffusion_model = instantiate_from_config(diff_model_config)
+        self.shark_diffusion = None
         self.conditioning_key = conditioning_key
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm', 'hybrid-adm', 'crossattn-adm']
 
@@ -1326,7 +1328,18 @@ class DiffusionWrapper(pl.LightningModule):
                 cc = torch.cat(c_crossattn, 1)
             else:
                 cc = c_crossattn
-            out = self.diffusion_model(x, t, context=cc)
+            if self.shark_diffusion == None:
+                self.shark_diffusion = compile_through_fx(self.diffusion_model, (x,t,cc), "diffusion_unet")
+                del self.diffusion_model
+
+            x_np = x.cpu().numpy()
+            t_np = t.cpu().numpy()
+            cc_np = cc.cpu().numpy()
+            out = self.shark_diffusion.forward((x_np,t_np,cc_np))
+            out = torch.from_numpy(out)
+            out = out.cuda()
+            # out = self.diffusion_model(x, t, context=cc)
+            # mlir_module, func_name = import_with_fx(self.diffusion_model, (x,t,cc), debug=True)
         elif self.conditioning_key == 'hybrid':
             xc = torch.cat([x] + c_concat, dim=1)
             cc = torch.cat(c_crossattn, 1)
